@@ -103,7 +103,7 @@ def post_process_dwg_folder(folder, strip_before_A=False, delete_pcp=False,
         base = filename[:-4]  # strip .dwg extension
 
         if rename_strip_prefix:
-            idx = base.find(rename_strip_prefix)
+            idx = base.rfind(rename_strip_prefix)  # rfind = last occurrence, handles prefix appearing twice
             if idx >= 0:
                 remainder = base[idx + len(rename_strip_prefix):]  # e.g. "A - PLAN - EXPORT - L1"
                 new_name  = remainder.replace(" - ", "-") + ".dwg"  # "A-PLAN-EXPORT-L1.dwg"
@@ -136,23 +136,46 @@ def cleanup_revit_backups(revit_file_path):
     """
     import re
     import shutil
+    import stat
+    import subprocess
     folder = os.path.dirname(revit_file_path)
     backup_file_pattern   = re.compile(r'\.\d{4}\.(rvt|rfa)$', re.IGNORECASE)
-    backup_folder_pattern = re.compile(r'_backup$', re.IGNORECASE)
+    backup_folder_pattern = re.compile(r'(_backup$|^Revit_temp$)', re.IGNORECASE)
     deleted_files = 0
     deleted_dirs  = 0
+
+    def force_remove_readonly(func, path, _):
+        """Error handler for shutil.rmtree: clear read-only flag then retry."""
+        os.chmod(path, stat.S_IWRITE)
+        func(path)
+
+    def force_delete_folder(full_path, entry):
+        try:
+            shutil.rmtree(full_path, onerror=force_remove_readonly)
+            return True
+        except OSError:
+            pass
+        # Fallback: use Windows rd command to bypass OneDrive/permission restrictions
+        try:
+            result = subprocess.call(
+                ['cmd', '/c', 'rd', '/s', '/q', full_path],
+                stdout=open(os.devnull, 'w'), stderr=open(os.devnull, 'w')
+            )
+            return result == 0
+        except OSError:
+            return False
 
     for entry in os.listdir(folder):
         full_path = os.path.join(folder, entry)
         if os.path.isdir(full_path) and backup_folder_pattern.search(entry):
-            try:
-                shutil.rmtree(full_path)
+            if force_delete_folder(full_path, entry):
                 Output("  Deleted backup folder: " + entry)
                 deleted_dirs += 1
-            except OSError as e:
-                Output("  WARNING: could not delete folder {}: {}".format(entry, str(e)))
+            else:
+                Output("  WARNING: could not delete folder: " + entry)
         elif os.path.isfile(full_path) and backup_file_pattern.search(entry):
             try:
+                os.chmod(full_path, stat.S_IWRITE)
                 os.remove(full_path)
                 Output("  Deleted backup file: " + entry)
                 deleted_files += 1
@@ -164,6 +187,83 @@ def cleanup_revit_backups(revit_file_path):
     else:
         Output("  Deleted {} backup folder(s) and {} backup file(s) from: {}".format(
             deleted_dirs, deleted_files, folder))
+
+
+def rename_weekly_folder(folder_path):
+    """
+    Rename a weekly folder so its date prefix reflects today's date.
+
+    Expects the folder name to contain ' - ' separating a date prefix from
+    the rest of the name, e.g.:
+      "2026_0630 - SBO-P1-CS - WEEKLY UPLOAD"
+      ->  "2026_0707 - SBO-P1-CS - WEEKLY UPLOAD"
+
+    Uses Shell.Application COM (via PowerShell subprocess) so that Windows
+    fires the shell change notification and Quick Access pins update automatically.
+    Falls back to os.rename() if the shell rename fails.
+    """
+    from datetime import date
+    import subprocess
+    parent      = os.path.dirname(folder_path)
+    folder_name = os.path.basename(folder_path)
+    separator   = " - "
+    idx         = folder_name.find(separator)
+    if idx < 0:
+        Output("  WARNING: could not rename weekly folder - no ' - ' separator found in: " + folder_name)
+        return
+    suffix    = folder_name[idx + len(separator):]
+    today_str = date.today().strftime("%Y_%m%d")
+    new_name  = today_str + separator + suffix
+    new_path  = os.path.join(parent, new_name)
+    if folder_path == new_path:
+        Output("  Weekly folder already has today's date: " + folder_name)
+        return
+
+    # Rename via Shell.Application so Explorer fires SHChangeNotify and
+    # Quick Access pins update. os.rename() bypasses the shell and breaks pins.
+    p = parent.replace("'", "''")
+    o = folder_name.replace("'", "''")
+    n = new_name.replace("'", "''")
+    ps = (
+        "$sh = New-Object -ComObject Shell.Application;"
+        "$ns = $sh.Namespace('{p}');"
+        "$it = $ns.ParseName('{o}');"
+        "if ($it) {{ $it.Name = '{n}' }} else {{ exit 1 }}"
+    ).format(p=p, o=o, n=n)
+
+    result = subprocess.call(
+        ['powershell', '-NoProfile', '-Command', ps],
+        stdout=open(os.devnull, 'w'),
+        stderr=open(os.devnull, 'w'),
+    )
+    if result == 0:
+        Output("  Renamed weekly folder: {} -> {}".format(folder_name, new_name))
+    else:
+        os.rename(folder_path, new_path)
+        Output("  Renamed weekly folder (pin may need refresh): {} -> {}".format(folder_name, new_name))
+
+
+def clear_folder_contents(folder):
+    """Delete all files and subfolders inside folder without removing the folder itself."""
+    import shutil, stat
+    if not os.path.exists(folder):
+        return
+
+    def force_remove_readonly(func, path, _):
+        os.chmod(path, stat.S_IWRITE)
+        func(path)
+
+    for entry in os.listdir(folder):
+        full_path = os.path.join(folder, entry)
+        try:
+            if os.path.isfile(full_path):
+                os.chmod(full_path, stat.S_IWRITE)
+                os.remove(full_path)
+            elif os.path.isdir(full_path):
+                shutil.rmtree(full_path, onerror=force_remove_readonly)
+        except OSError as e:
+            Output("  WARNING: could not delete {}: {}".format(entry, str(e)))
+    Output("  Cleared folder: " + folder)
 
 
 def resolve_output_folder(base_folder, date_subfolder=False):
