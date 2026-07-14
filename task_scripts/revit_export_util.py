@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """
 Shared utility for Revit DWG and PDF batch exports via RevitBatchProcessor.
 Place in the same folder as all job task scripts so Python can import it.
@@ -19,8 +20,13 @@ def get_view_ids(doc, set_name):
     """Return a .NET List[ElementId] for a named ViewSheetSet stored in the document."""
     for vss in FilteredElementCollector(doc).OfClass(ViewSheetSet):
         if vss.Name == set_name:
-            return List[ElementId]([v.Id for v in vss.Views])
-    raise Exception("View/Sheet Set not found in document: '{}'".format(set_name))
+            ids = List[ElementId]([v.Id for v in vss.Views])
+            Output("  Sheet set '{}': {} view(s) found.".format(set_name, ids.Count))
+            return ids
+    all_sets = sorted(v.Name for v in FilteredElementCollector(doc).OfClass(ViewSheetSet))
+    raise Exception(
+        "View/Sheet Set not found: '{}'. Available sets: {}".format(set_name, all_sets)
+    )
 
 
 def export_dwg(doc, setup_name, sheet_set_name, output_folder):
@@ -52,9 +58,39 @@ def export_pdf_native(doc, setup_name, sheet_set_name, output_folder, pdf_filena
     Output("  PDF done -> " + output_folder)
 
 
+def export_pdf_sheets(doc, sheet_set_name, output_folder, setup_name=None):
+    """
+    Export individual PDFs using native Revit export (no virtual printer needed).
+    Revit names each file using the PDF Export Preset's naming rule - set it to
+    'Sheet Number + Sheet Name' in the Revit UI. Call post_process_dwg_folder
+    with file_ext='.pdf' afterward to strip the view-index suffix (the -1 in A-060-1).
+
+    setup_name  Name of a PDF Export Preset saved in the document (File > Export > PDF).
+                If None, Revit default PDFExportOptions are used.
+    """
+    from Autodesk.Revit.DB import ExportPDFSettings, PDFExportOptions
+
+    if not os.path.exists(output_folder):
+        os.makedirs(output_folder)
+
+    if setup_name:
+        settings = ExportPDFSettings.FindByName(doc, setup_name)
+        if settings is None:
+            raise Exception("PDF Export Setup not found: '{}'".format(setup_name))
+        options = settings.GetOptions()
+    else:
+        options = PDFExportOptions()
+
+    options.Combine = False
+    view_ids = get_view_ids(doc, sheet_set_name)
+    doc.Export(output_folder, view_ids, options)
+    Output("  PDF done -> " + output_folder)
+
+
 def export_pdf_print(doc, sheet_set_name, output_folder, pdf_filename=None,
-                     pdf_printer="Microsoft Print to PDF"):
-    """Export PDF via PrintManager (Revit < 2022 fallback)."""
+                     pdf_printer="Microsoft Print to PDF", print_setup_name=None):
+    """Export PDF via PrintManager. Supports named print setups (e.g. 'Anduril')."""
+    from Autodesk.Revit.DB import PrintSetting
     if not os.path.exists(output_folder):
         os.makedirs(output_folder)
     out_name = (pdf_filename or "export") + ".pdf"
@@ -63,6 +99,15 @@ def export_pdf_print(doc, sheet_set_name, output_folder, pdf_filename=None,
     pm.PrintToFile    = True
     pm.CombinedFile   = True
     pm.PrintToFileName = os.path.join(output_folder, out_name)
+    if print_setup_name:
+        ps = next(
+            (p for p in FilteredElementCollector(doc).OfClass(PrintSetting)
+             if p.Name == print_setup_name),
+            None,
+        )
+        if ps is None:
+            raise Exception("Print Setup not found in document: '{}'".format(print_setup_name))
+        pm.PrintSetup.CurrentPrintSetting = ps
     pm.ViewSheetSetting.CurrentViewSheetSet = next(
         vss for vss in FilteredElementCollector(doc).OfClass(ViewSheetSet)
         if vss.Name == sheet_set_name
@@ -73,11 +118,17 @@ def export_pdf_print(doc, sheet_set_name, output_folder, pdf_filename=None,
 
 
 def post_process_dwg_folder(folder, strip_before_A=False, delete_pcp=False,
-                            rename_strip_prefix=None):
+                            rename_strip_prefix=None, rename_regex=None, file_ext=".dwg"):
     """
     Optional post-processing on exported DWG files.
 
     delete_pcp          Delete the .pcp plotter config files Revit generates alongside DWGs.
+
+    rename_regex        Tuple (pattern, replacement) applied via re.sub to the base filename
+                        (without .dwg extension).
+                        e.g. (r'^.*Sheet - (A-[A-Z0-9]+)-\d+( - .+)$', r'\1\2')
+                             "Project Avalon_Building 20_AI_26-Sheet - A-060-1 - OVERALL SLAB PLANS - BUILDING 20"
+                          -> "A-060 - OVERALL SLAB PLANS - BUILDING 20"
 
     rename_strip_prefix Find this string in the filename, keep everything from that point,
                         and replace ' - ' with '-'.
@@ -87,8 +138,9 @@ def post_process_dwg_folder(folder, strip_before_A=False, delete_pcp=False,
 
     strip_before_A      Simpler fallback: remove everything before the first 'A'.
                         e.g. "20241115 - A100 Floor Plan.dwg" -> "A100 Floor Plan.dwg"
-                        Not used when rename_strip_prefix is set.
+                        Not used when rename_strip_prefix or rename_regex is set.
     """
+    import re as _re
     for filename in os.listdir(folder):
         filepath = os.path.join(folder, filename)
 
@@ -97,16 +149,28 @@ def post_process_dwg_folder(folder, strip_before_A=False, delete_pcp=False,
             Output("  Deleted: " + filename)
             continue
 
-        if not filename.lower().endswith(".dwg"):
+        if not filename.lower().endswith(file_ext):
             continue
 
-        base = filename[:-4]  # strip .dwg extension
+        base = filename[:-len(file_ext)]  # strip extension
 
-        if rename_strip_prefix:
+        if rename_regex:
+            pattern, replacement = rename_regex
+            new_base = _re.sub(pattern, replacement, base)
+            if new_base != base:
+                new_name = new_base + file_ext
+                new_path = os.path.join(folder, new_name)
+                if not os.path.exists(new_path):
+                    os.rename(filepath, new_path)
+                    Output("  Renamed: {} -> {}".format(filename, new_name))
+            else:
+                Output("  WARNING: rename_regex did not match '{}'".format(filename))
+
+        elif rename_strip_prefix:
             idx = base.rfind(rename_strip_prefix)  # rfind = last occurrence, handles prefix appearing twice
             if idx >= 0:
                 remainder = base[idx + len(rename_strip_prefix):]  # e.g. "A - PLAN - EXPORT - L1"
-                new_name  = remainder.replace(" - ", "-") + ".dwg"  # "A-PLAN-EXPORT-L1.dwg"
+                new_name  = remainder.replace(" - ", "-") + file_ext
                 new_path  = os.path.join(folder, new_name)
                 if not os.path.exists(new_path):
                     os.rename(filepath, new_path)
@@ -117,7 +181,7 @@ def post_process_dwg_folder(folder, strip_before_A=False, delete_pcp=False,
         elif strip_before_A:
             idx = base.find("A")
             if idx > 0:
-                new_name = base[idx:] + ".dwg"
+                new_name = base[idx:] + file_ext
                 new_path = os.path.join(folder, new_name)
                 if not os.path.exists(new_path):
                     os.rename(filepath, new_path)
@@ -221,15 +285,23 @@ def rename_weekly_folder(folder_path):
 
     # Rename via Shell.Application so Explorer fires SHChangeNotify and
     # Quick Access pins update. os.rename() bypasses the shell and breaks pins.
+    #
+    # First close any Explorer windows navigated INTO this folder — Windows
+    # refuses to rename a folder that an Explorer window is currently inside.
     p = parent.replace("'", "''")
     o = folder_name.replace("'", "''")
     n = new_name.replace("'", "''")
+    fp = folder_path.replace("'", "''")
     ps = (
         "$sh = New-Object -ComObject Shell.Application;"
+        "foreach ($win in @($sh.Windows())) {{"
+        "  try {{ if ($win.Document.Folder.Self.Path -eq '{fp}') {{ $win.Quit() }} }} catch {{}}"
+        "}};"
+        "Start-Sleep -Milliseconds 400;"
         "$ns = $sh.Namespace('{p}');"
         "$it = $ns.ParseName('{o}');"
         "if ($it) {{ $it.Name = '{n}' }} else {{ exit 1 }}"
-    ).format(p=p, o=o, n=n)
+    ).format(fp=fp, p=p, o=o, n=n)
 
     result = subprocess.call(
         ['powershell', '-NoProfile', '-Command', ps],
@@ -245,13 +317,28 @@ def rename_weekly_folder(folder_path):
 
 def clear_folder_contents(folder):
     """Delete all files and subfolders inside folder without removing the folder itself."""
-    import shutil, stat
+    import shutil, stat, subprocess
     if not os.path.exists(folder):
         return
 
     def force_remove_readonly(func, path, _):
         os.chmod(path, stat.S_IWRITE)
         func(path)
+
+    def force_delete_dir(full_path):
+        try:
+            shutil.rmtree(full_path, onerror=force_remove_readonly)
+            return True
+        except OSError:
+            pass
+        try:
+            result = subprocess.call(
+                ['cmd', '/c', 'rd', '/s', '/q', full_path],
+                stdout=open(os.devnull, 'w'), stderr=open(os.devnull, 'w'),
+            )
+            return result == 0
+        except OSError:
+            return False
 
     for entry in os.listdir(folder):
         full_path = os.path.join(folder, entry)
@@ -260,7 +347,8 @@ def clear_folder_contents(folder):
                 os.chmod(full_path, stat.S_IWRITE)
                 os.remove(full_path)
             elif os.path.isdir(full_path):
-                shutil.rmtree(full_path, onerror=force_remove_readonly)
+                if not force_delete_dir(full_path):
+                    Output("  WARNING: could not delete folder: " + entry)
         except OSError as e:
             Output("  WARNING: could not delete {}: {}".format(entry, str(e)))
     Output("  Cleared folder: " + folder)
@@ -305,13 +393,29 @@ def run_exports(doc, uiapp, exports):
             export_dwg(doc, cfg["setup"], cfg["sheet_set"], folder)
             post_process_dwg_folder(
                 folder,
+                rename_regex=cfg.get("rename_regex"),
                 rename_strip_prefix=cfg.get("rename_strip_prefix"),
                 strip_before_A=cfg.get("strip_before_A", False),
                 delete_pcp=cfg.get("delete_pcp", False),
             )
         elif cfg["type"] == "PDF":
-            pdf_fn = cfg.get("pdf_filename")
-            if revit_version >= 2022:
+            pdf_fn  = cfg.get("pdf_filename")
+            printer = cfg.get("printer")
+            if cfg.get("pdf_individual"):
+                export_pdf_sheets(doc, cfg["sheet_set"], folder, setup_name=cfg.get("setup"))
+                post_process_dwg_folder(
+                    folder,
+                    rename_regex=cfg.get("rename_regex"),
+                    file_ext=".pdf",
+                )
+            elif printer:
+                export_pdf_print(
+                    doc, cfg["sheet_set"], folder,
+                    pdf_filename=pdf_fn,
+                    pdf_printer=printer,
+                    print_setup_name=cfg.get("print_setup"),
+                )
+            elif revit_version >= 2022:
                 export_pdf_native(doc, cfg["setup"], cfg["sheet_set"], folder, pdf_filename=pdf_fn)
             else:
                 export_pdf_print(doc, cfg["sheet_set"], folder, pdf_filename=pdf_fn)

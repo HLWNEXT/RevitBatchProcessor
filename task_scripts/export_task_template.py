@@ -32,9 +32,14 @@ EXPORTS = [
 ]
 # ----------------------------------------------------------------------------
 
+import os
+import sys
 import revit_script_util
-import revit_export_util
 from revit_script_util import Output
+# If this script is in a subfolder, add the parent (task_scripts/) to the path
+# so revit_export_util.py can be found. Remove this line if the script is in the root folder.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(revit_script_util.GetTaskScriptFilePath()))))
+import revit_export_util
 
 doc   = revit_script_util.GetScriptDocument()
 uiapp = revit_script_util.GetUIApplication()

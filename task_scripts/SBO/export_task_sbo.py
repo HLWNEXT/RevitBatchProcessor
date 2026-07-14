@@ -13,10 +13,12 @@ How to find the exact preset names in Revit:
 """
 
 import os
+import sys
 import glob
 import revit_script_util
-import revit_export_util
 from revit_script_util import Output
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(revit_script_util.GetTaskScriptFilePath()))))
+import revit_export_util
 
 doc             = revit_script_util.GetScriptDocument()
 uiapp           = revit_script_util.GetUIApplication()
