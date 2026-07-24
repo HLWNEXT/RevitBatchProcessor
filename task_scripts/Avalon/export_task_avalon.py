@@ -87,5 +87,39 @@ if _should_clear:
 
 revit_export_util.run_exports(doc, uiapp, EXPORTS)
 Output("Renaming weekly folder...")
-revit_export_util.rename_weekly_folder(weekly_folder)
+final_folder = revit_export_util.rename_weekly_folder(weekly_folder)
+
+# After the last building, combine all PDFs and zip the folder.
+if revit_script_util.GetProgressNumber() == revit_script_util.GetProgressMax():
+    Output("Last building complete - combining PDFs and creating zip...")
+    import subprocess
+    combine_script = os.path.join(
+        os.path.dirname(revit_script_util.GetTaskScriptFilePath()),
+        'avalon_post_combine.py',
+    )
+    _ran = False
+    for _py in ['python', 'py', 'python3']:
+        try:
+            proc = subprocess.Popen(
+                [_py, combine_script, final_folder],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            _out, _err = proc.communicate()
+            for _line in (_out or b'').decode('utf-8', errors='replace').splitlines():
+                if _line.strip():
+                    Output("  " + _line)
+            if proc.returncode == 0:
+                _ran = True
+                break
+            Output("  WARNING: combine script exited {}".format(proc.returncode))
+            for _line in (_err or b'').decode('utf-8', errors='replace').splitlines():
+                if _line.strip():
+                    Output("  " + _line)
+        except OSError:
+            continue
+    if not _ran:
+        Output("  WARNING: Python not found. Run manually: python \"{}\" \"{}\"".format(
+            combine_script, final_folder))
+
 Output("Job complete.")

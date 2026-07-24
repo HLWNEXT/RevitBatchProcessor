@@ -163,8 +163,6 @@ def post_process_dwg_folder(folder, strip_before_A=False, delete_pcp=False,
                 if not os.path.exists(new_path):
                     os.rename(filepath, new_path)
                     Output("  Renamed: {} -> {}".format(filename, new_name))
-            else:
-                Output("  WARNING: rename_regex did not match '{}'".format(filename))
 
         elif rename_strip_prefix:
             idx = base.rfind(rename_strip_prefix)  # rfind = last occurrence, handles prefix appearing twice
@@ -274,14 +272,14 @@ def rename_weekly_folder(folder_path):
     idx         = folder_name.find(separator)
     if idx < 0:
         Output("  WARNING: could not rename weekly folder - no ' - ' separator found in: " + folder_name)
-        return
+        return folder_path
     suffix    = folder_name[idx + len(separator):]
     today_str = date.today().strftime("%Y_%m%d")
     new_name  = today_str + separator + suffix
     new_path  = os.path.join(parent, new_name)
     if folder_path == new_path:
         Output("  Weekly folder already has today's date: " + folder_name)
-        return
+        return folder_path
 
     # Rename via Shell.Application so Explorer fires SHChangeNotify and
     # Quick Access pins update. os.rename() bypasses the shell and breaks pins.
@@ -313,6 +311,7 @@ def rename_weekly_folder(folder_path):
     else:
         os.rename(folder_path, new_path)
         Output("  Renamed weekly folder (pin may need refresh): {} -> {}".format(folder_name, new_name))
+    return new_path
 
 
 def clear_folder_contents(folder):
