@@ -18,7 +18,7 @@ import shutil
 import sys
 import zipfile
 
-SERVER_FOLDER = r"P:\2026\26047\2-MODEL\3-CAD\PLOT\ARCH"
+SERVER_FOLDER = r"\\hlw.com\projects\LA\2026\26047\2-MODEL\3-CAD\PLOT\ARCH"
 
 try:
     from pypdf import PdfWriter, PdfReader
